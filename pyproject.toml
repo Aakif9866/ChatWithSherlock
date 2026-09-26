@@ -1,0 +1,10 @@
+[project]
+name = "all-mix-llms"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "litellm[proxy]>=1.102.1",
+    "streamlit>=1.64.0",
+]

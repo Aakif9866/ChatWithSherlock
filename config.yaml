@@ -1,0 +1,37 @@
+model_list:
+  # All four share the name "free-auto" → LiteLLM spreads load across them
+  # and skips any that are rate-limited
+  - model_name: free-auto
+    litellm_params:
+      model: gemini/gemini-3.8-flash
+      api_key: os.environ/GEMINI_API_KEY
+      rpm: 10
+
+  - model_name: free-auto
+    litellm_params:
+      model: groq/openai/gpt-oss-120b
+      api_key: os.environ/GROQ_API_KEY
+      rpm: 30
+
+  # - model_name: free-cerebras
+  #   litellm_params:
+  #     model: cerebras/gpt-oss-120b
+  #     api_key: os.environ/CEREBRAS_API_KEY
+  #     rpm: 30
+
+  - model_name: free-auto
+    litellm_params:
+      model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+      rpm: 5
+
+router_settings:
+  num_retries: 3 # on error/429, try another provider
+  cooldown_time: 60 # a provider that fails gets benched for 60s
+  allowed_fails: 1
+
+litellm_settings:
+  drop_params: true # silently drop params a model doesn't support
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY # random key stored in .env; your apps use this as the "API key"

@@ -1,0 +1,117 @@
+=====================================================================
+  ALL MIX LLMs — one free "AI endpoint" built from several providers
+=====================================================================
+
+WHAT THIS IS
+------------
+A LiteLLM proxy running on your laptop. Your apps talk to ONE address
+(http://localhost:4000) and ONE model name ("free-auto"). Behind it,
+LiteLLM picks one of: Gemini, Groq, OpenRouter (Cerebras later).
+If one is rate-limited or broken, it retries on another.
+
+app.py is a Sherlock Holmes chatbot (Streamlit) that uses that endpoint.
+
+
+FILES
+-----
+  .env          your API keys + LITELLM_MASTER_KEY (the proxy's password)
+                format: NAME=value, no spaces, no quotes
+                NEVER share or commit this file (it's in .gitignore)
+  config.yaml   which providers/models sit behind "free-auto"
+  app.py        Sherlock Holmes chatbot UI
+  pyproject.toml / uv.lock   Python dependencies (managed by uv)
+
+
+---------------------------------------------------------------------
+HOW TO RUN  (2 terminals)
+---------------------------------------------------------------------
+
+0) Go to the folder (every new terminal):
+     cd "/Users/shaikyasin/Documents/AI/courses/Agentic AI course (FCC)/all mix LLMs"
+
+1) First time only — install dependencies:
+     uv sync
+
+2) TERMINAL 1 — start the proxy (leave it running):
+     uv run --env-file .env litellm --config config.yaml --host 127.0.0.1 --port 4000
+
+   (--host 127.0.0.1 = only this computer can use the proxy, not your Wi-Fi)
+
+   Wait until you see the "free-auto" model list printed.
+
+3) (optional) Quick test that it works — in TERMINAL 2:
+     set -a; source .env; set +a      (loads the key, prints nothing)
+
+     curl http://localhost:4000/v1/chat/completions \
+       -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+       -H "Content-Type: application/json" \
+       -d '{"model":"free-auto","messages":[{"role":"user","content":"say hi"}]}'
+
+   Check that every provider is healthy:
+     curl http://localhost:4000/health -H "Authorization: Bearer $LITELLM_MASTER_KEY"
+
+4) TERMINAL 2 — start the chatbot:
+     uv run --env-file .env streamlit run app.py
+
+   It opens http://localhost:8501 in your browser.
+   - Each reply shows "via Groq / Gemini / OpenRouter" + time taken.
+   - Sidebar "Stress test" fires many requests at once, so you can
+     watch load balancing, rate limits (429) and failover.
+
+5) Stop everything: press Ctrl+C in each terminal.
+
+
+---------------------------------------------------------------------
+HOW IT WORKS
+---------------------------------------------------------------------
+
+   app.py / curl / any OpenAI-style app
+            |
+            |  POST /v1/chat/completions   model="free-auto"
+            |  Authorization: Bearer <LITELLM_MASTER_KEY>
+            v
+   +---------------------------+
+   |  LiteLLM proxy :4000      |   reads config.yaml + keys from .env
+   |  "free-auto" = 3 entries  |
+   +---------------------------+
+        |          |          |
+        v          v          v
+     Gemini      Groq     OpenRouter      (each with its own key)
+
+1. Your app speaks the OpenAI API format. It does not know or care
+   which company answers.
+2. LiteLLM sees model="free-auto". In config.yaml, three entries share
+   that name, so it treats them as a POOL and picks one (load balancing,
+   respecting each entry's rpm = requests-per-minute limit).
+3. LiteLLM TRANSLATES the request into that provider's own format
+   (Gemini's API is different from OpenAI's; Groq/OpenRouter are
+   OpenAI-like), adds that provider's API key, and sends it.
+4. It translates the answer back into OpenAI format and returns it.
+5. If a provider fails (429 rate limit, 404, 500...), the router:
+     - retries on another entry (num_retries: 3)
+     - benches the failing one for 60 s (cooldown_time: 60)
+   So you usually still get an answer even when a free tier runs out.
+
+LITELLM_MASTER_KEY is NOT a provider key. It is the proxy's own password
+(master_key in config.yaml reads it from .env). Real keys never leave the proxy.
+
+
+---------------------------------------------------------------------
+COMMON PROBLEMS
+---------------------------------------------------------------------
+  404 "model not found"  -> provider retired that model. List live ones:
+      set -a; source .env; set +a   (in the terminal, then:)
+      curl -s https://api.groq.com/openai/v1/models -H "Authorization: Bearer $GROQ_API_KEY"
+      curl -s "https://generativelanguage.googleapis.com/v1beta/models?key=$GEMINI_API_KEY"
+      curl -s https://openrouter.ai/api/v1/models      (use IDs ending in :free)
+    and update the "model:" line in config.yaml (keep the gemini/ groq/
+    openrouter/ prefix). Restart the proxy after any config change.
+
+  429 "rate limit / quota" -> that free tier is used up for now. The
+    proxy will fail over; wait a minute (or a day for daily quotas).
+
+  Chatbot says "proxy failed" -> Terminal 1 (the proxy) isn't running.
+
+  Adding Cerebras later -> put the key in .env (CEREBRAS_API_KEY=...),
+    uncomment the Cerebras block in config.yaml, set its model_name to
+    free-auto, restart the proxy.
