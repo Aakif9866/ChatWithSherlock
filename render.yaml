@@ -1,0 +1,14 @@
+# Render Blueprint: New > Blueprint > pick this repo. Render asks for the three keys.
+services:
+  - type: web
+    name: chat-with-sherlock
+    runtime: docker
+    plan: free
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false

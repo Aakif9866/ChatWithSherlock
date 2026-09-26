@@ -1,8 +1,8 @@
-# Hugging Face Spaces (Docker SDK): LiteLLM proxy (private) + Streamlit app (public on 7860)
+# Docker image (used by Render): LiteLLM proxy (private) + Streamlit app (public on $PORT, default 7860)
 FROM python:3.12-slim
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
-# Spaces run containers as user 1000
+# Run as a non-root user
 RUN useradd -m -u 1000 user
 USER user
 WORKDIR /home/user/app
