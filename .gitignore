@@ -11,3 +11,6 @@ wheels/
 
 # Secrets (API keys)
 .env
+
+# Personal notes (local only)
+docs/

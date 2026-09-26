@@ -3,3 +3,6 @@ address = "localhost"  # only this computer can open the app
 
 [browser]
 gatherUsageStats = false  # no usage stats sent to Streamlit
+
+[client]
+toolbarMode = "minimal"  # hide the developer menu / Deploy button

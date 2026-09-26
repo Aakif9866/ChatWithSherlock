@@ -11,6 +11,7 @@
 import json
 import os
 import random
+import threading
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -25,7 +26,11 @@ MODEL = "free-auto"
 # Limits: keep each request small so free-tier token quotas last longer
 MAX_INPUT_CHARS = 1000   # longest message a user may send
 MAX_HISTORY = 20         # only the last 20 messages are sent to the model
-MAX_REPLY_TOKENS = 800   # cap on each reply's length
+MAX_REPLY_TOKENS = 2000  # cap per reply; includes hidden "thinking" tokens, so not too low
+
+# Public deployment (PUBLIC_MODE=1): each visitor gets MAX_QUESTIONS, stress test is hidden
+PUBLIC_MODE = os.environ.get("PUBLIC_MODE") == "1"
+MAX_QUESTIONS = 10
 
 SYSTEM_PROMPT = """You are Sherlock Holmes, the consulting detective of 221B Baker Street.
 Stay in character at all times. You are brilliant, precise, a little arrogant, and easily
@@ -95,7 +100,18 @@ st.markdown("""
 
 html, body, .stApp, .stMarkdown, p, li { font-family: 'EB Garamond', Georgia, serif; font-size: 1.08rem; }
 h1, h2, h3 { font-family: 'Playfair Display', Georgia, serif !important; letter-spacing: .5px; }
-[data-testid="stChatInput"] textarea { font-family: 'EB Garamond', Georgia, serif; }
+[data-testid="stChatInput"] textarea { font-family: 'EB Garamond', Georgia, serif; font-size: 16px; }
+[data-testid="stTable"] { overflow-x: auto; }
+
+/* Phones: tighter spacing, smaller title, wider chat bubbles */
+@media (max-width: 640px) {
+  .block-container, [data-testid="stMainBlockContainer"] { padding: 3.5rem 0.75rem 6rem !important; }
+  h1 { font-size: 1.6rem !important; line-height: 1.25 !important; }
+  html, body, .stApp, .stMarkdown, p, li { font-size: 1rem; }
+  [data-testid="stChatMessage"] { padding: 0.6rem 0.5rem; gap: 0.5rem; }
+  [data-testid="stChatMessage"] [data-testid^="stChatMessageAvatar"] { width: 1.8rem; height: 1.8rem; }
+  [data-testid="stBottom"] > div { padding-left: 0.75rem; padding-right: 0.75rem; }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -110,6 +126,31 @@ if not PROXY_KEY:
 if "history" not in st.session_state:
     st.session_state.history = []  # list of dicts: role, content, provider, secs
 
+
+@st.cache_resource
+def question_counter():
+    """Questions asked per visitor, shared across all sessions (resets when the app restarts)."""
+    return {}, threading.Lock()
+
+
+def visitor_id() -> str:
+    """Visitor's IP (first X-Forwarded-For hop behind a proxy), so a page refresh doesn't reset the limit."""
+    forwarded = st.context.headers.get("X-Forwarded-For", "")
+    return forwarded.split(",")[0].strip() or st.context.ip_address or "unknown"
+
+
+def questions_used() -> int:
+    counts, lock = question_counter()
+    with lock:
+        return counts.get(visitor_id(), 0)
+
+
+def use_question() -> None:
+    counts, lock = question_counter()
+    with lock:
+        counts[visitor_id()] = counts.get(visitor_id(), 0) + 1
+
+
 # ---- Sidebar: stats + stress test ----------------------------------------
 with st.sidebar:
     st.header("Proxy stats")
@@ -117,12 +158,16 @@ with st.sidebar:
     for m in st.session_state.history:
         if m["role"] == "assistant":
             counts[m["provider"]] = counts.get(m["provider"], 0) + 1
-    st.write(counts or "No replies yet")
+    if counts:
+        st.markdown("\n".join(f"- **{n}** · {p}" for p, n in counts.items()))
+    else:
+        st.caption("No replies yet")
 
-    st.header("Stress test")
-    st.caption("Fire N parallel requests to see load balancing, rate limits and failover.")
-    n = st.slider("Parallel requests", 1, 30, 10)
-    if st.button("Run burst"):
+    if not PUBLIC_MODE:
+        st.header("Stress test")
+        st.caption("Fire N parallel requests to see load balancing, rate limits and failover.")
+        n = st.slider("Parallel requests", 1, 30, 10)
+    if not PUBLIC_MODE and st.button("Run burst"):
         msgs = [{"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": "In one sentence, deduce something about me."}]
 
@@ -152,7 +197,18 @@ for m in st.session_state.history:
         elif m["role"] == "watson":
             st.caption("Sherlock unavailable — proxy on port 4000 is not reachable")
 
-if prompt := st.chat_input("Present your case to Mr. Holmes...", max_chars=MAX_INPUT_CHARS):
+out_of_questions = PUBLIC_MODE and questions_used() >= MAX_QUESTIONS
+if PUBLIC_MODE:
+    if out_of_questions:
+        st.info("🎻 Holmes has taken up his violin and will see you no further. "
+                f"(Each visitor may ask {MAX_QUESTIONS} questions on this public demo.)")
+    else:
+        st.caption(f"Questions left: {MAX_QUESTIONS - questions_used()} of {MAX_QUESTIONS}")
+
+if prompt := st.chat_input("Present your case to Mr. Holmes...", max_chars=MAX_INPUT_CHARS,
+                           disabled=out_of_questions):
+    if PUBLIC_MODE:
+        use_question()
     st.session_state.history.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
