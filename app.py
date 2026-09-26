@@ -8,9 +8,12 @@
 # Sherlock Holmes chatbot — talks to the LiteLLM proxy (free-auto)
 # Run the proxy first, then:  uv run --env-file .env streamlit run app.py
 # ---------------------------------------------------------------
+import hashlib
+import hmac
 import json
 import os
 import random
+import secrets
 import threading
 import time
 import urllib.request
@@ -31,6 +34,8 @@ MAX_REPLY_TOKENS = 2000  # cap per reply; includes hidden "thinking" tokens, so 
 # Public deployment (PUBLIC_MODE=1): each visitor gets MAX_QUESTIONS, stress test is hidden
 PUBLIC_MODE = os.environ.get("PUBLIC_MODE") == "1"
 MAX_QUESTIONS = 10
+STATS_KEY = os.environ.get("STATS_KEY", "")  # open ?stats=<STATS_KEY> to see usage; unset = disabled
+CONTACT_EMAIL = "aakif9866@gmail.com"
 
 SYSTEM_PROMPT = """You are Sherlock Holmes, the consulting detective of 221B Baker Street.
 Stay in character at all times. You are brilliant, precise, a little arrogant, and easily
@@ -115,8 +120,64 @@ h1, h2, h3 { font-family: 'Playfair Display', Georgia, serif !important; letter-
 </style>
 """, unsafe_allow_html=True)
 
+@st.cache_resource
+def usage():
+    """Usage shared across all sessions, in memory only (resets when the app restarts).
+    Visitors are stored as salted hashes, never raw IPs; chat content is never stored."""
+    return {"questions": {}, "providers": {}, "started": time.time(),
+            "salt": secrets.token_hex(16)}, threading.Lock()
+
+
+def visitor_id() -> str:
+    """Anonymous visitor id: hash of the IP (first X-Forwarded-For hop behind a proxy),
+    so a page refresh doesn't reset the limit."""
+    forwarded = st.context.headers.get("X-Forwarded-For", "")
+    ip = forwarded.split(",")[0].strip() or st.context.ip_address or "unknown"
+    return hashlib.sha256((usage()[0]["salt"] + ip).encode()).hexdigest()[:10]
+
+
+def questions_used() -> int:
+    data, lock = usage()
+    with lock:
+        return data["questions"].get(visitor_id(), 0)
+
+
+def use_question() -> int:
+    data, lock = usage()
+    with lock:
+        n = data["questions"][visitor_id()] = data["questions"].get(visitor_id(), 0) + 1
+    return n
+
+
+def log_usage(n: int, provider: str, secs: float) -> None:
+    """One line per question in the server log (Render → Logs). No chat content."""
+    data, lock = usage()
+    with lock:
+        data["providers"][provider] = data["providers"].get(provider, 0) + 1
+    print(f"[usage] visitor={visitor_id()} question={n}/{MAX_QUESTIONS} "
+          f"provider={provider} secs={secs:.1f}", flush=True)
+
+
+# ---- Private stats page: ?stats=<STATS_KEY> -------------------------------
+if STATS_KEY and hmac.compare_digest(st.query_params.get("stats", ""), STATS_KEY):
+    data, lock = usage()
+    with lock:
+        counts = dict(data["questions"])
+        providers = dict(data["providers"])
+    st.title("📊 Usage stats")
+    st.caption(f"Since last restart: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(data['started']))}")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Unique visitors", len(counts))
+    c2.metric("Questions asked", sum(counts.values()))
+    c3.metric("Hit the limit", sum(1 for n in counts.values() if n >= MAX_QUESTIONS))
+    if providers:
+        st.subheader("Replies by provider")
+        st.markdown("\n".join(f"- **{n}** · {p}" for p, n in sorted(providers.items(), key=lambda x: -x[1])))
+    st.stop()
+
 st.title("🕵️ Chat with Sherlock Holmes")
 st.caption("Every reply goes through your LiteLLM proxy → Gemini / Groq / OpenRouter")
+st.markdown(f"[✉️ Contact me](mailto:{CONTACT_EMAIL}?subject=Chat%20with%20Sherlock)")
 
 if not PROXY_KEY:
     st.error("LITELLM_MASTER_KEY is not set. Start the app with: "
@@ -125,30 +186,6 @@ if not PROXY_KEY:
 
 if "history" not in st.session_state:
     st.session_state.history = []  # list of dicts: role, content, provider, secs
-
-
-@st.cache_resource
-def question_counter():
-    """Questions asked per visitor, shared across all sessions (resets when the app restarts)."""
-    return {}, threading.Lock()
-
-
-def visitor_id() -> str:
-    """Visitor's IP (first X-Forwarded-For hop behind a proxy), so a page refresh doesn't reset the limit."""
-    forwarded = st.context.headers.get("X-Forwarded-For", "")
-    return forwarded.split(",")[0].strip() or st.context.ip_address or "unknown"
-
-
-def questions_used() -> int:
-    counts, lock = question_counter()
-    with lock:
-        return counts.get(visitor_id(), 0)
-
-
-def use_question() -> None:
-    counts, lock = question_counter()
-    with lock:
-        counts[visitor_id()] = counts.get(visitor_id(), 0) + 1
 
 
 # ---- Sidebar: stats + stress test ----------------------------------------
@@ -203,12 +240,13 @@ if PUBLIC_MODE:
         st.info("🎻 Holmes has taken up his violin and will see you no further. "
                 f"(Each visitor may ask {MAX_QUESTIONS} questions on this public demo.)")
     else:
-        st.caption(f"Questions left: {MAX_QUESTIONS - questions_used()} of {MAX_QUESTIONS}")
+        st.caption(f"Questions left: {MAX_QUESTIONS - questions_used()} of {MAX_QUESTIONS} · "
+                   "Anonymous usage is counted (hashed IP, no chat content stored) "
+                   "to keep this free demo fair.")
 
 if prompt := st.chat_input("Present your case to Mr. Holmes...", max_chars=MAX_INPUT_CHARS,
                            disabled=out_of_questions):
-    if PUBLIC_MODE:
-        use_question()
+    n = use_question() if PUBLIC_MODE else 0
     st.session_state.history.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -227,10 +265,13 @@ if prompt := st.chat_input("Present your case to Mr. Holmes...", max_chars=MAX_I
                 text, provider, secs = ask(messages)
             st.session_state.history.append(
                 {"role": "assistant", "content": text, "provider": provider, "secs": secs})
+            log_usage(n, provider, secs)
         except (APIConnectionError, OSError):  # proxy is down / port 4000 closed
             st.session_state.history.append(
                 {"role": "watson", "content": random.choice(WATSON_REPLIES)})
+            log_usage(n, "Watson (proxy down)", 0)
         except Exception as e:  # proxy is up but every provider failed
+            log_usage(n, "ERROR", 0)
             st.error(f"The proxy answered with an error: {e}")
             st.stop()
     st.rerun()
