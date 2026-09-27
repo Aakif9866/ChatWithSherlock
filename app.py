@@ -38,9 +38,11 @@ STATS_KEY = os.environ.get("STATS_KEY", "")  # open ?stats=<STATS_KEY> to see us
 
 # Optional database for the all-time visitor count: Upstash Redis (free tier), over its REST API.
 # Unset = counts live in memory only and reset when the app restarts.
-REDIS_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
-REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+# .strip(...) tolerates values pasted with spaces or quotes around them
+REDIS_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").strip().strip("\"'").rstrip("/")
+REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "").strip().strip("\"'")
 DB_ENABLED = bool(REDIS_URL and REDIS_TOKEN)
+DB_LAST_ERROR = ""
 CONTACT_EMAIL = "aakif9866@gmail.com"
 
 SYSTEM_PROMPT = """You are Sherlock Holmes, the consulting detective of 221B Baker Street.
@@ -155,7 +157,9 @@ def redis(*command):
         with urllib.request.urlopen(req, timeout=3) as r:
             return json.load(r).get("result")
     except Exception as e:
-        print(f"[db] {command[0]} failed: {e}", flush=True)
+        global DB_LAST_ERROR
+        DB_LAST_ERROR = f"{command[0]} failed: {e}"
+        print(f"[db] {DB_LAST_ERROR}", flush=True)
         return None
 
 
@@ -225,10 +229,15 @@ if STATS_KEY and hmac.compare_digest(st.query_params.get("stats", ""), STATS_KEY
         visitors = len(data["visitors"])
     all_time = redis("SCARD", "sherlock:visitors")
     st.title("📊 Usage stats")
-    if all_time is not None:
-        st.metric("All-time unique visitors (database)", all_time)
+    if not DB_ENABLED:
+        st.warning("Database not configured (UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN unset) - "
+                   "only counts since the last restart are available.")
+    elif all_time is None:
+        st.error(f"Database configured but not reachable: {DB_LAST_ERROR}. "
+                 "Check that UPSTASH_REDIS_REST_URL is the https:// REST URL and the token is correct.")
     else:
-        st.caption("Database not configured - only counts since the last restart are available.")
+        st.success(f"Database connected ({REDIS_URL.split('//')[-1]})")
+        st.metric("All-time unique visitors (database)", all_time)
     st.caption(f"Since last restart: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(data['started']))}")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Visitors", visitors)
@@ -303,9 +312,10 @@ with st.container(key="navbar", horizontal=True, vertical_alignment="center",
     with st.container(key="brand", width="content"):
         st.markdown("🕵️ 221B Baker Street")
     with st.container(horizontal=True, vertical_alignment="center", width="content"):
-        st.badge(f"{users} {'user' if users == 1 else 'users'}", icon="👥", color="gray",
-                 help=("Unique visitors of all time" if DB_ENABLED else
-                       "Unique visitors since the app last restarted") + " (anonymous: hashed IP).")
+        st.badge(f"{users} {'visitor' if users == 1 else 'visitors'} so far", icon="👥", color="gray",
+                 help=("People who have visited this site so far, counted once each" if DB_ENABLED else
+                       "People who have visited since the app last restarted, counted once each")
+                      + " (anonymous: hashed IP).")
         st.button("Contact me", icon="✉️", key="contact_btn", on_click=contact_open, args=(1,))
 
 st.title("🕵️ Chat with Sherlock Holmes")
