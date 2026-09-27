@@ -108,8 +108,9 @@ h1, h2, h3 { font-family: 'Playfair Display', Georgia, serif !important; letter-
 [data-testid="stChatInput"] textarea { font-family: 'EB Garamond', Georgia, serif; font-size: 16px; }
 [data-testid="stTable"] { overflow-x: auto; }
 
-/* Contact button pinned bottom-right, above the chat box */
-.st-key-contact_fab { position: fixed; right: 1.25rem; bottom: 8rem; z-index: 1000; width: auto !important; }
+/* Navbar: brand on the left, user count + contact button on the right */
+.st-key-navbar { border-bottom: 1px solid rgba(128, 128, 128, .25); padding-bottom: .6rem; margin-bottom: .25rem; }
+.st-key-brand p { font-family: 'Playfair Display', Georgia, serif; font-weight: 700; font-size: 1.15rem; margin: 0; }
 
 /* The grand email reveal */
 .contact-reveal { text-align: center; padding: .5rem 0 1rem; }
@@ -131,7 +132,6 @@ h1, h2, h3 { font-family: 'Playfair Display', Georgia, serif !important; letter-
   [data-testid="stChatMessage"] { padding: 0.6rem 0.5rem; gap: 0.5rem; }
   [data-testid="stChatMessage"] [data-testid^="stChatMessageAvatar"] { width: 1.8rem; height: 1.8rem; }
   [data-testid="stBottom"] > div { padding-left: 0.75rem; padding-right: 0.75rem; }
-  .st-key-contact_fab { right: 0.75rem; }
   .contact-reveal .email { font-size: 1.3rem; }
 }
 </style>
@@ -141,7 +141,7 @@ h1, h2, h3 { font-family: 'Playfair Display', Georgia, serif !important; letter-
 def usage():
     """Usage shared across all sessions, in memory only (resets when the app restarts).
     Visitors are stored as salted hashes, never raw IPs; chat content is never stored."""
-    return {"questions": {}, "providers": {}, "started": time.time(),
+    return {"questions": {}, "providers": {}, "visitors": set(), "started": time.time(),
             "salt": secrets.token_hex(16)}, threading.Lock()
 
 
@@ -149,7 +149,7 @@ def visitor_id() -> str:
     """Anonymous visitor id: hash of the IP (first X-Forwarded-For hop behind a proxy),
     so a page refresh doesn't reset the limit."""
     forwarded = st.context.headers.get("X-Forwarded-For", "")
-    ip = forwarded.split(",")[0].strip() or st.context.ip_address or "unknown"
+    ip = str(forwarded.split(",")[0].strip() or st.context.ip_address or "unknown")
     return hashlib.sha256((usage()[0]["salt"] + ip).encode()).hexdigest()[:10]
 
 
@@ -175,22 +175,99 @@ def log_usage(n: int, provider: str, secs: float) -> None:
           f"provider={provider} secs={secs:.1f}", flush=True)
 
 
+def record_visit() -> int:
+    """Remember this visitor (hashed) and return how many unique visitors we've seen."""
+    data, lock = usage()
+    with lock:
+        data["visitors"].add(visitor_id())
+        return len(data["visitors"])
+
+
 # ---- Private stats page: ?stats=<STATS_KEY> -------------------------------
 if STATS_KEY and hmac.compare_digest(st.query_params.get("stats", ""), STATS_KEY):
     data, lock = usage()
     with lock:
         counts = dict(data["questions"])
         providers = dict(data["providers"])
+        visitors = len(data["visitors"])
     st.title("📊 Usage stats")
     st.caption(f"Since last restart: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(data['started']))}")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Unique visitors", len(counts))
-    c2.metric("Questions asked", sum(counts.values()))
-    c3.metric("Hit the limit", sum(1 for n in counts.values() if n >= MAX_QUESTIONS))
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Visitors", visitors)
+    c2.metric("Chatted", len(counts))
+    c3.metric("Questions asked", sum(counts.values()))
+    c4.metric("Hit the limit", sum(1 for n in counts.values() if n >= MAX_QUESTIONS))
     if providers:
         st.subheader("Replies by provider")
         st.markdown("\n".join(f"- **{n}** · {p}" for p, n in sorted(providers.items(), key=lambda x: -x[1])))
     st.stop()
+
+# ---- Contact: 4 "are you sure?" dialogs at random spots, then the email is revealed ----
+# The email is only sent to the browser after the 4th "Yes, really".
+CONTACT_QUESTIONS = [
+    "Do you really want to contact me?",
+    "Do you really want to meet me?",
+    "Are you absolutely certain? Mrs. Hudson will have to put the kettle on.",
+    "Final answer? Holmes deduces you will write a rather splendid email.",
+]
+
+
+def contact_reset():
+    st.session_state.contact_step = 0
+
+
+def contact_open(step: int):
+    """Open question `step` (1-based) at a new random offset from the centre."""
+    st.session_state.contact_step = step
+    # fractions of the free space around the dialog: sideways either way, downward only
+    # (Streamlit pins dialogs near the top), so it always stays on screen
+    st.session_state.contact_pos = (random.uniform(-0.45, 0.45), random.uniform(0, 0.8))
+
+
+def contact_dialog(step: int):
+    dx, dy = st.session_state.contact_pos
+
+    @st.dialog(f"✉️ Question {step} of {len(CONTACT_QUESTIONS)}", on_dismiss=contact_reset)
+    def ask_again():
+        st.markdown(f"""<style>[data-testid="stDialog"] > div {{ transform: translate(
+            calc((100vw - 100%) * {dx:.2f}), calc((100vh - 100% - 7rem) * {dy:.2f})); }}</style>""",
+                    unsafe_allow_html=True)
+        st.markdown(f"#### {CONTACT_QUESTIONS[step - 1]}")
+        yes, no = st.columns(2)
+        if yes.button("Yes, really", type="primary", width="stretch"):
+            if step < len(CONTACT_QUESTIONS):
+                contact_open(step + 1)
+            else:
+                contact_reset()
+                st.session_state.contact_reveal = True
+            st.rerun()
+        if no.button("Not really", width="stretch"):
+            contact_reset()
+            st.rerun()
+
+    ask_again()
+
+
+@st.dialog("🎩 Elementary! The case is closed.", width="medium")
+def contact_reveal():
+    st.markdown(f"""<div class="contact-reveal">
+        <div>Your persistence is remarkable. You may write to me at</div>
+        <div class="email">{CONTACT_EMAIL}</div>
+        </div>""", unsafe_allow_html=True)
+    st.link_button("✉️ Write the email", f"mailto:{CONTACT_EMAIL}?subject=Chat%20with%20Sherlock",
+                   type="primary", width="stretch")
+
+
+# ---- Navbar ------------------------------------------------------------------
+users = record_visit()
+with st.container(key="navbar", horizontal=True, vertical_alignment="center",
+                  horizontal_alignment="distribute"):
+    with st.container(key="brand", width="content"):
+        st.markdown("🕵️ 221B Baker Street")
+    with st.container(horizontal=True, vertical_alignment="center", width="content"):
+        st.badge(f"{users} {'user' if users == 1 else 'users'}", icon="👥", color="gray",
+                 help="Unique visitors since the app last restarted (anonymous: hashed IP).")
+        st.button("Contact me", icon="✉️", key="contact_btn", on_click=contact_open, args=(1,))
 
 st.title("🕵️ Chat with Sherlock Holmes")
 st.caption("Every reply goes through your LiteLLM proxy → Gemini / Groq / OpenRouter")
@@ -259,65 +336,6 @@ if PUBLIC_MODE:
         st.caption(f"Questions left: {MAX_QUESTIONS - questions_used()} of {MAX_QUESTIONS} · "
                    "Anonymous usage is counted (hashed IP, no chat content stored) "
                    "to keep this free demo fair.")
-
-# ---- Contact: 4 "are you sure?" dialogs at random spots, then the email is revealed ----
-# The email is only sent to the browser after the 4th "Yes, really".
-CONTACT_QUESTIONS = [
-    "Do you really want to contact me?",
-    "Do you really want to meet me?",
-    "Are you absolutely certain? Mrs. Hudson will have to put the kettle on.",
-    "Final answer? Holmes deduces you will write a rather splendid email.",
-]
-
-
-def contact_reset():
-    st.session_state.contact_step = 0
-
-
-def contact_open(step: int):
-    """Open question `step` (1-based) at a new random offset from the centre."""
-    st.session_state.contact_step = step
-    # fractions of the free space around the dialog: sideways either way, downward only
-    # (Streamlit pins dialogs near the top), so it always stays on screen
-    st.session_state.contact_pos = (random.uniform(-0.45, 0.45), random.uniform(0, 0.8))
-
-
-def contact_dialog(step: int):
-    dx, dy = st.session_state.contact_pos
-
-    @st.dialog(f"✉️ Question {step} of {len(CONTACT_QUESTIONS)}", on_dismiss=contact_reset)
-    def ask_again():
-        st.markdown(f"""<style>[data-testid="stDialog"] > div {{ transform: translate(
-            calc((100vw - 100%) * {dx:.2f}), calc((100vh - 100% - 7rem) * {dy:.2f})); }}</style>""",
-                    unsafe_allow_html=True)
-        st.markdown(f"#### {CONTACT_QUESTIONS[step - 1]}")
-        yes, no = st.columns(2)
-        if yes.button("Yes, really", type="primary", width="stretch"):
-            if step < len(CONTACT_QUESTIONS):
-                contact_open(step + 1)
-            else:
-                contact_reset()
-                st.session_state.contact_reveal = True
-            st.rerun()
-        if no.button("Not really", width="stretch"):
-            contact_reset()
-            st.rerun()
-
-    ask_again()
-
-
-@st.dialog("🎩 Elementary! The case is closed.", width="medium")
-def contact_reveal():
-    st.markdown(f"""<div class="contact-reveal">
-        <div>Your persistence is remarkable. You may write to me at</div>
-        <div class="email">{CONTACT_EMAIL}</div>
-        </div>""", unsafe_allow_html=True)
-    st.link_button("✉️ Write the email", f"mailto:{CONTACT_EMAIL}?subject=Chat%20with%20Sherlock",
-                   type="primary", width="stretch")
-
-
-with st.container(key="contact_fab"):
-    st.button("✉️", key="contact_btn", help="Contact me", on_click=contact_open, args=(1,))
 
 if st.session_state.get("contact_step", 0):
     contact_dialog(st.session_state.contact_step)
