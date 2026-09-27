@@ -108,6 +108,21 @@ h1, h2, h3 { font-family: 'Playfair Display', Georgia, serif !important; letter-
 [data-testid="stChatInput"] textarea { font-family: 'EB Garamond', Georgia, serif; font-size: 16px; }
 [data-testid="stTable"] { overflow-x: auto; }
 
+/* Contact button pinned bottom-right, above the chat box */
+.st-key-contact_fab { position: fixed; right: 1.25rem; bottom: 8rem; z-index: 1000; width: auto !important; }
+
+/* The grand email reveal */
+.contact-reveal { text-align: center; padding: .5rem 0 1rem; }
+.contact-reveal .email {
+  display: inline-block; margin-top: .75rem; font-family: 'Playfair Display', Georgia, serif;
+  font-size: 1.7rem; font-weight: 700; word-break: break-all;
+  background: linear-gradient(90deg, #b8860b, #e8c872, #b8860b); background-size: 200% auto;
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: shimmer 2.5s linear infinite, pop .6s ease-out;
+}
+@keyframes shimmer { to { background-position: 200% center; } }
+@keyframes pop { 0% { transform: scale(.4); opacity: 0; } 70% { transform: scale(1.12); } 100% { transform: scale(1); opacity: 1; } }
+
 /* Phones: tighter spacing, smaller title, wider chat bubbles */
 @media (max-width: 640px) {
   .block-container, [data-testid="stMainBlockContainer"] { padding: 3.5rem 0.75rem 6rem !important; }
@@ -116,6 +131,8 @@ h1, h2, h3 { font-family: 'Playfair Display', Georgia, serif !important; letter-
   [data-testid="stChatMessage"] { padding: 0.6rem 0.5rem; gap: 0.5rem; }
   [data-testid="stChatMessage"] [data-testid^="stChatMessageAvatar"] { width: 1.8rem; height: 1.8rem; }
   [data-testid="stBottom"] > div { padding-left: 0.75rem; padding-right: 0.75rem; }
+  .st-key-contact_fab { right: 0.75rem; }
+  .contact-reveal .email { font-size: 1.3rem; }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -243,7 +260,70 @@ if PUBLIC_MODE:
                    "Anonymous usage is counted (hashed IP, no chat content stored) "
                    "to keep this free demo fair.")
 
-st.markdown(f"[✉️ Contact me](mailto:{CONTACT_EMAIL}?subject=Chat%20with%20Sherlock)")
+# ---- Contact: 4 "are you sure?" dialogs at random spots, then the email is revealed ----
+# The email is only sent to the browser after the 4th "Yes, really".
+CONTACT_QUESTIONS = [
+    "Do you really want to contact me?",
+    "Do you really want to meet me?",
+    "Are you absolutely certain? Mrs. Hudson will have to put the kettle on.",
+    "Final answer? Holmes deduces you will write a rather splendid email.",
+]
+
+
+def contact_reset():
+    st.session_state.contact_step = 0
+
+
+def contact_open(step: int):
+    """Open question `step` (1-based) at a new random offset from the centre."""
+    st.session_state.contact_step = step
+    # fractions of the free space around the dialog: sideways either way, downward only
+    # (Streamlit pins dialogs near the top), so it always stays on screen
+    st.session_state.contact_pos = (random.uniform(-0.45, 0.45), random.uniform(0, 0.8))
+
+
+def contact_dialog(step: int):
+    dx, dy = st.session_state.contact_pos
+
+    @st.dialog(f"✉️ Question {step} of {len(CONTACT_QUESTIONS)}", on_dismiss=contact_reset)
+    def ask_again():
+        st.markdown(f"""<style>[data-testid="stDialog"] > div {{ transform: translate(
+            calc((100vw - 100%) * {dx:.2f}), calc((100vh - 100% - 7rem) * {dy:.2f})); }}</style>""",
+                    unsafe_allow_html=True)
+        st.markdown(f"#### {CONTACT_QUESTIONS[step - 1]}")
+        yes, no = st.columns(2)
+        if yes.button("Yes, really", type="primary", width="stretch"):
+            if step < len(CONTACT_QUESTIONS):
+                contact_open(step + 1)
+            else:
+                contact_reset()
+                st.session_state.contact_reveal = True
+            st.rerun()
+        if no.button("Not really", width="stretch"):
+            contact_reset()
+            st.rerun()
+
+    ask_again()
+
+
+@st.dialog("🎩 Elementary! The case is closed.", width="medium")
+def contact_reveal():
+    st.markdown(f"""<div class="contact-reveal">
+        <div>Your persistence is remarkable. You may write to me at</div>
+        <div class="email">{CONTACT_EMAIL}</div>
+        </div>""", unsafe_allow_html=True)
+    st.link_button("✉️ Write the email", f"mailto:{CONTACT_EMAIL}?subject=Chat%20with%20Sherlock",
+                   type="primary", width="stretch")
+
+
+with st.container(key="contact_fab"):
+    st.button("✉️", key="contact_btn", help="Contact me", on_click=contact_open, args=(1,))
+
+if st.session_state.get("contact_step", 0):
+    contact_dialog(st.session_state.contact_step)
+elif st.session_state.pop("contact_reveal", False):
+    st.balloons()
+    contact_reveal()
 
 if prompt := st.chat_input("Present your case to Mr. Holmes...", max_chars=MAX_INPUT_CHARS,
                            disabled=out_of_questions):
