@@ -35,7 +35,13 @@ MAX_REPLY_TOKENS = 2000  # cap per reply; includes hidden "thinking" tokens, so 
 PUBLIC_MODE = os.environ.get("PUBLIC_MODE") == "1"
 MAX_QUESTIONS = 10
 STATS_KEY = os.environ.get("STATS_KEY", "")  # open ?stats=<STATS_KEY> to see usage; unset = disabled
-CONTACT_EMAIL = "klyroapp2026@gmail.com"
+
+# Optional database for the all-time visitor count: Upstash Redis (free tier), over its REST API.
+# Unset = counts live in memory only and reset when the app restarts.
+REDIS_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
+REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+DB_ENABLED = bool(REDIS_URL and REDIS_TOKEN)
+CONTACT_EMAIL = "aakif9866@gmail.com"
 
 SYSTEM_PROMPT = """You are Sherlock Holmes, the consulting detective of 221B Baker Street.
 Stay in character at all times. You are brilliant, precise, a little arrogant, and easily
@@ -137,12 +143,33 @@ h1, h2, h3 { font-family: 'Playfair Display', Georgia, serif !important; letter-
 </style>
 """, unsafe_allow_html=True)
 
+def redis(*command):
+    """Run one Redis command through Upstash's REST API. Returns the result, or None if the
+    database isn't configured or the call fails (the app then falls back to memory)."""
+    if not DB_ENABLED:
+        return None
+    req = urllib.request.Request(REDIS_URL, data=json.dumps(command).encode(),
+                                 headers={"Authorization": f"Bearer {REDIS_TOKEN}",
+                                          "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=3) as r:
+            return json.load(r).get("result")
+    except Exception as e:
+        print(f"[db] {command[0]} failed: {e}", flush=True)
+        return None
+
+
 @st.cache_resource
 def usage():
-    """Usage shared across all sessions, in memory only (resets when the app restarts).
-    Visitors are stored as salted hashes, never raw IPs; chat content is never stored."""
+    """Usage shared across all sessions, in memory (resets when the app restarts).
+    Visitors are stored as salted hashes, never raw IPs; chat content is never stored.
+    With the database on, the salt is kept there so a visitor's hash stays the same across
+    restarts - otherwise returning visitors would be counted again."""
+    salt = secrets.token_hex(16)
+    redis("SET", "sherlock:salt", salt, "NX")  # only the first boot ever sets it
+    salt = redis("GET", "sherlock:salt") or salt
     return {"questions": {}, "providers": {}, "visitors": set(), "started": time.time(),
-            "salt": secrets.token_hex(16)}, threading.Lock()
+            "salt": salt}, threading.Lock()
 
 
 def visitor_id() -> str:
@@ -176,11 +203,17 @@ def log_usage(n: int, provider: str, secs: float) -> None:
 
 
 def record_visit() -> int:
-    """Remember this visitor (hashed) and return how many unique visitors we've seen."""
+    """Remember this visitor (hashed) and return the unique-visitor count:
+    all-time from the database if configured, otherwise since the last restart."""
+    vid = visitor_id()
     data, lock = usage()
     with lock:
-        data["visitors"].add(visitor_id())
-        return len(data["visitors"])
+        data["visitors"].add(vid)
+        since_restart = len(data["visitors"])
+    if "visitor_total" not in st.session_state:  # hit the database once per browser session
+        redis("SADD", "sherlock:visitors", vid)  # a set stores each visitor only once
+        st.session_state.visitor_total = redis("SCARD", "sherlock:visitors")
+    return st.session_state.visitor_total or since_restart
 
 
 # ---- Private stats page: ?stats=<STATS_KEY> -------------------------------
@@ -190,7 +223,12 @@ if STATS_KEY and hmac.compare_digest(st.query_params.get("stats", ""), STATS_KEY
         counts = dict(data["questions"])
         providers = dict(data["providers"])
         visitors = len(data["visitors"])
+    all_time = redis("SCARD", "sherlock:visitors")
     st.title("📊 Usage stats")
+    if all_time is not None:
+        st.metric("All-time unique visitors (database)", all_time)
+    else:
+        st.caption("Database not configured - only counts since the last restart are available.")
     st.caption(f"Since last restart: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(data['started']))}")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Visitors", visitors)
@@ -266,7 +304,8 @@ with st.container(key="navbar", horizontal=True, vertical_alignment="center",
         st.markdown("🕵️ 221B Baker Street")
     with st.container(horizontal=True, vertical_alignment="center", width="content"):
         st.badge(f"{users} {'user' if users == 1 else 'users'}", icon="👥", color="gray",
-                 help="Unique visitors since the app last restarted (anonymous: hashed IP).")
+                 help=("Unique visitors of all time" if DB_ENABLED else
+                       "Unique visitors since the app last restarted") + " (anonymous: hashed IP).")
         st.button("Contact me", icon="✉️", key="contact_btn", on_click=contact_open, args=(1,))
 
 st.title("🕵️ Chat with Sherlock Holmes")
