@@ -35,7 +35,7 @@ MAX_REPLY_TOKENS = 2000  # cap per reply; includes hidden "thinking" tokens, so 
 PUBLIC_MODE = os.environ.get("PUBLIC_MODE") == "1"
 MAX_QUESTIONS = 10
 STATS_KEY = os.environ.get("STATS_KEY", "")  # open ?stats=<STATS_KEY> to see usage; unset = disabled
-CONTACT_EMAIL = "aakif9866@gmail.com"
+CONTACT_EMAIL = "klyroapp2026@gmail.com"
 
 SYSTEM_PROMPT = """You are Sherlock Holmes, the consulting detective of 221B Baker Street.
 Stay in character at all times. You are brilliant, precise, a little arrogant, and easily
@@ -177,7 +177,6 @@ if STATS_KEY and hmac.compare_digest(st.query_params.get("stats", ""), STATS_KEY
 
 st.title("🕵️ Chat with Sherlock Holmes")
 st.caption("Every reply goes through your LiteLLM proxy → Gemini / Groq / OpenRouter")
-st.markdown(f"[✉️ Contact me](mailto:{CONTACT_EMAIL}?subject=Chat%20with%20Sherlock)")
 
 if not PROXY_KEY:
     st.error("LITELLM_MASTER_KEY is not set. Start the app with: "
@@ -243,6 +242,8 @@ if PUBLIC_MODE:
         st.caption(f"Questions left: {MAX_QUESTIONS - questions_used()} of {MAX_QUESTIONS} · "
                    "Anonymous usage is counted (hashed IP, no chat content stored) "
                    "to keep this free demo fair.")
+
+st.markdown(f"[✉️ Contact me](mailto:{CONTACT_EMAIL}?subject=Chat%20with%20Sherlock)")
 
 if prompt := st.chat_input("Present your case to Mr. Holmes...", max_chars=MAX_INPUT_CHARS,
                            disabled=out_of_questions):
